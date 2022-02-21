@@ -101,59 +101,6 @@ def column_type(name, schema_property):
         return SchemaField(safe_name, result_type, 'NULLABLE')
 
 
-def column_type_avro(name, schema_property):
-    property_type = schema_property['type']
-    property_format = schema_property.get('format', None)
-    result = {"name": safe_column_name(name, quotes=False)}
-
-    if 'array' in property_type:
-        try:
-            items_type = column_type_avro(name, schema_property['items'])
-            result_type = {
-                'type': 'array',
-                'items': items_type['type']}
-        except KeyError:
-            result_type = 'string'
-    elif 'object' in property_type:
-        items_types = [
-            column_type_avro(col, schema_property)
-            for col, schema_property in schema_property.get('properties', {}).items()]
-
-        if items_types:
-            result_type = {
-                'type': 'record',
-                'name': name + '_properties',
-                'fields': items_types}
-        else:
-            result_type = 'string'
-
-    elif property_format == 'date-time':
-        result_type = {
-            'type': 'long',
-            'logicalType': 'timestamp-millis'}
-    elif property_format == 'time':
-        result_type = {
-            'type': 'int',
-            'logicalType': 'time-millis'}
-    elif 'number' in property_type:
-        result_type = {
-            'type': 'bytes',
-            'logicalType': 'decimal',
-            'scale': 9,
-            'precision': 38}
-    elif 'integer' in property_type and 'string' in property_type:
-        result_type = 'string'
-    elif 'integer' in property_type:
-        result_type = 'long'
-    elif 'boolean' in property_type:
-        result_type = 'boolean'
-    else:
-        result_type = 'string'
-
-    result['type'] = ['null', result_type]
-    return result
-
-
 def safe_column_name(name, quotes=False):
     name = name.replace('`', '')
     pattern = '[^a-zA-Z0-9_]'
@@ -402,60 +349,11 @@ class DbSync:
             raise exc
         return ','.join(key_props)
 
-    def avro_schema(self):
-        project_id = self.connection_config['project_id']
-        pattern = r"[^A-Za-z0-9_]"
-        clean_project_id = re.sub(pattern, '', project_id)
-        schema = {
-             "type": "record",
-             "namespace": "{}.{}.pipelinewise.avro".format(
-                 clean_project_id,
-                 self.schema_name,
-                 ),
-             "name": self.stream_schema_message['stream'],
-             "fields": [column_type_avro(name, c) for name, c in self.flatten_schema.items()]}
-
-        if re.search(pattern, schema['name']):
-            schema["alias"] = schema['name']
-            schema["name"] = re.sub(pattern, "_", schema['name'])
-
-        return schema
-
-    # TODO: write tests for the json.dumps lines below and verify nesting
-    # TODO: improve performance
-    def records_to_avro(self, records):
+    def records_to_json(self, records):
         for record in records:
-            flatten = flatten_record(record, max_level=self.data_flattening_max_level)
-            result = {}
-            for name, props in self.flatten_schema.items():
-                if name in flatten:
-                    if is_unstructured_object(props):
-                        result[name] = json.dumps(flatten[name])
-                    # dump to string if array without items or recursive
-                    elif ('array' in props['type'] and
-                          (not 'items' in props
-                           or '$ref' in props['items'])):
-                        result[name] = json.dumps(flatten[name])
-                    # dump array elements to strings
-                    elif (
-                        'array' in props['type'] and
-                        is_unstructured_object(props.get('items', {}))
-                    ):
-                        result[name] = [json.dumps(value) for value in flatten[name]]
-                    elif 'number' in props['type']:
-                        if flatten[name] is None:
-                            result[name] = None
-                        else:
-                            n = Decimal(flatten[name])
-                            # limit n to the range -MAX_NUM to MAX_NUM
-                            result[name] = MAX_NUM if n > MAX_NUM else -MAX_NUM if n < -MAX_NUM else n.quantize(ALLOWED_DECIMALS)
-                    else:
-                        result[name] = flatten[name] if name in flatten else ''
-                else:
-                    result[name] = None
-            yield result
+            yield json.dumps(flatten_record(record, max_level=self.data_flattening_max_level))
 
-    def load_avro(self, f, count):
+    def load_json(self, f, count):
         stream_schema_message = self.stream_schema_message
         stream = stream_schema_message['stream']
         logger.info("Loading {} rows into '{}'".format(count, self.table_name(stream, False)))
@@ -463,19 +361,25 @@ class DbSync:
         project_id = self.connection_config['project_id']
         # TODO: make temp table creation and DML atomic with merge
         temp_table = self.table_name(stream_schema_message['stream'], is_temporary=True, without_schema=True)
-
         logger.info("INSERTING INTO {} ({})".format(
             temp_table,
             ', '.join(self.column_names())
         ))
 
+        # Get schema for table from the base table.
+        schema = self.client.get_table(
+            bigquery.DatasetReference(project_id, self.schema_name).table(
+                self.table_name(stream_schema_message['stream'], is_temporary=False, without_schema=True)
+            )
+        ).schema
+
         dataset_id = self.connection_config.get('temp_schema', self.schema_name).strip()
         table_ref = bigquery.DatasetReference(project_id, dataset_id).table(temp_table)
-        job_config = bigquery.LoadJobConfig()
-        job_config.source_format = bigquery.SourceFormat.AVRO
-        job_config.use_avro_logical_types = True
+        job_config = bigquery.LoadJobConfig(schema=schema)
+        job_config.source_format = bigquery.SourceFormat.NEWLINE_DELIMITED_JSON
         job_config.write_disposition = 'WRITE_TRUNCATE'
-        job = self.client.load_table_from_file(f, table_ref, job_config=job_config)
+        with open(f, 'rt') as file:
+            job = self.client.load_table_from_file(file, table_ref, job_config=job_config)
         job.result()
 
         if len(self.stream_schema_message['key_properties']) > 0:
