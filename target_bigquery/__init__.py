@@ -38,13 +38,27 @@ def add_metadata_columns_to_schema(schema_message):
 
     Metadata columns gives information about data injections
     """
-    extended_schema_message = schema_message
+    extended_schema_message = schema_message.copy()
     extended_schema_message['schema']['properties']['_sdc_extracted_at'] = {'type': ['null', 'string'],
                                                                             'format': 'date-time'}
     extended_schema_message['schema']['properties']['_sdc_batched_at'] = {'type': ['null', 'string'],
                                                                           'format': 'date-time'}
     extended_schema_message['schema']['properties']['_sdc_deleted_at'] = {'type': ['null', 'string'],
                                                                           'format': 'date-time'}
+
+    return extended_schema_message
+
+
+def remove_metadata_columns_from_schema(schema_message):
+    """Metadata _sdc columns according to the stitch documentation at
+    https://www.stitchdata.com/docs/data-structure/integration-schemas#sdc-columns
+
+    Metadata columns gives information about data injections
+    """
+    extended_schema_message = schema_message.copy()
+    extended_schema_message['schema']['properties'] = {
+        k: v for k, v in extended_schema_message['schema']['properties'].items() if not k.startswith('_sdc_')
+    }
 
     return extended_schema_message
 
@@ -216,7 +230,7 @@ def persist_lines(config, lines) -> None:
             if config.get('add_metadata_columns') or hard_delete_mapping.get(stream, default_hard_delete):
                 stream_to_sync[stream] = DbSync(config, add_metadata_columns_to_schema(o))
             else:
-                stream_to_sync[stream] = DbSync(config, o)
+                stream_to_sync[stream] = DbSync(config, remove_metadata_columns_from_schema(o))
 
             try:
                 stream_to_sync[stream].create_schema_if_not_exists()
