@@ -118,7 +118,11 @@ def persist_lines(config, lines) -> None:
                             "or more) Try removing 'multipleOf' methods from JSON schema.")
                     raise RecordValidationException(f"Record does not pass schema validation. RECORD: {o['record']}")
 
-            if config.get('add_metadata_columns') or hard_delete_mapping.get(stream, default_hard_delete):
+            if (
+                config.get('add_metadata_columns') or
+                config.get('append_only') or
+                hard_delete_mapping.get(stream, default_hard_delete)
+            ):
                 record = stream_utils.add_metadata_values_to_record(o)
             else:
                 record = stream_utils.remove_metadata_values_from_record(
@@ -137,12 +141,18 @@ def persist_lines(config, lines) -> None:
                 primary_key_string = 'RID-{}'.format(total_row_count[stream])
 
             # increment row count only when a new PK is encountered in the current batch
-            if primary_key_string not in records_to_load[stream]:
+            # or we're running in append_only mode.
+            if primary_key_string not in records_to_load[stream] or config.get('append_only'):
                 row_count[stream] += 1
                 total_row_count[stream] += 1
 
             # append record
-            records_to_load[stream][primary_key_string] = record
+            if config.get('append_only'):
+                records = records_to_load[stream].get(primary_key_string, [])
+                records.append(record)
+            else:
+                records = [record]
+            records_to_load[stream][primary_key_string] = records
 
             flush = False
             if row_count[stream] >= batch_size_rows:
@@ -222,7 +232,7 @@ def persist_lines(config, lines) -> None:
             key_properties[stream] = o['key_properties']
 
             hard_delete = hard_delete_mapping.get(stream, default_hard_delete)
-            if config.get('add_metadata_columns') or hard_delete:
+            if config.get('add_metadata_columns') or config.get('append_only') or hard_delete:
                 stream_to_sync[stream] = DbSync(
                     config,
                     add_metadata_columns_to_schema(o),
@@ -374,7 +384,10 @@ def load_stream_batch(stream, records_to_load, row_count, db_sync):
 
 def flush_records(stream, records_to_load, row_count, db_sync):
     # Seek to the beginning of the file and load
-    db_sync.load_records(records_to_load.values(), row_count)
+    db_sync.load_records(
+        [record for pk in records_to_load.values() for record in pk],
+        row_count
+    )
 
 
 def main():
