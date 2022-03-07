@@ -463,7 +463,7 @@ class DbSync:
                 (SELECT s.* FROM `{}` s)
                 """.format(
             f'{dest.dataset_id}.{dest.table_id}',
-            ', '.join(self.column_names()),
+            ', '.join(self.column_names(quotes=True)),
             f'{src.dataset_id}.{src.table_id}',
         )
 
@@ -565,8 +565,8 @@ class DbSync:
                      safe_column_name(c, quotes=True))
              for c in names])
 
-    def column_names(self):
-        return [safe_column_name(name) for name in self.flatten_schema]
+    def column_names(self, quotes=False):
+        return [safe_column_name(name, quotes=quotes) for name in self.flatten_schema]
 
     def create_table(self, is_temporary: bool = False) -> bigquery.Table:
         stream_schema_message = self.stream_schema_message
