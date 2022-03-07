@@ -141,12 +141,18 @@ def persist_lines(config, lines) -> None:
                 primary_key_string = 'RID-{}'.format(total_row_count[stream])
 
             # increment row count only when a new PK is encountered in the current batch
-            if primary_key_string not in records_to_load[stream]:
+            # or we're running in append_only mode.
+            if primary_key_string not in records_to_load[stream] or config.get('append_only'):
                 row_count[stream] += 1
                 total_row_count[stream] += 1
 
             # append record
-            records_to_load[stream][primary_key_string] = record
+            if config.get('append_only'):
+                records = records_to_load[stream].get(primary_key_string, [])
+                records.append(record)
+            else:
+                records = [record]
+            records_to_load[stream][primary_key_string] = records
 
             flush = False
             if row_count[stream] >= batch_size_rows:
@@ -378,7 +384,10 @@ def load_stream_batch(stream, records_to_load, row_count, db_sync):
 
 def flush_records(stream, records_to_load, row_count, db_sync):
     # Seek to the beginning of the file and load
-    db_sync.load_records(records_to_load.values(), row_count)
+    db_sync.load_records(
+        [record for pk in records_to_load.values() for record in pk],
+        row_count
+    )
 
 
 def main():
