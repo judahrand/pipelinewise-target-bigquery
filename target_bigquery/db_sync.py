@@ -40,6 +40,8 @@ class BigQueryJSONEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, o)
 
     def _bq_format(self, o, field_type):
+        if o is None:
+            return o
         if field_type == 'string' and not isinstance(o, str):
             return json.JSONEncoder.encode(self, o)
         if field_type == 'numeric':
